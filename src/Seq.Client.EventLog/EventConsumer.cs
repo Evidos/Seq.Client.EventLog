@@ -1,10 +1,10 @@
 ﻿using Serilog;
-using Serilog.Context;
 using Serilog.Events;
 using Serilog.Parsing;
 using System;
 using System.Collections.Generic;
-using System.Threading.Tasks;
+using System.Diagnostics.Eventing.Reader;
+using System.Linq;
 
 namespace Seq.Client.EventLog
 {
@@ -33,6 +33,36 @@ namespace Seq.Client.EventLog
 
                 Log.Logger.Write(logEvent);
             }
+        }
+
+        public static void PostEventRecord(EventRecord eventRecord)
+        {
+            var template = new MessageTemplateParser().Parse(eventRecord.TaskDisplayName ?? eventRecord.LogName);
+            var datetimeOffset = DateTime.SpecifyKind(eventRecord.TimeCreated.Value, DateTimeKind.Local);
+            var properties = new List<LogEventProperty>
+            {
+                new LogEventProperty("ActivityId", new ScalarValue(eventRecord.ActivityId)),
+                new LogEventProperty("EventLogId", new ScalarValue(eventRecord.Id)),
+                new LogEventProperty("Keywords", new ScalarValue(eventRecord.Keywords)),
+                new LogEventProperty("MachineName", new ScalarValue(eventRecord.MachineName)),
+                new LogEventProperty("TaskDisplayName", new ScalarValue(eventRecord.TaskDisplayName)),
+                new LogEventProperty("LogName", new ScalarValue(eventRecord.LogName))
+            };
+
+            Event iisEvent = eventRecord.ToXml().ParseXML<Event>();
+            foreach (var prop in iisEvent.EventData)
+            {
+                properties.Add(new LogEventProperty(prop.Name, new ScalarValue(prop.Value)));
+            }
+
+            if(eventRecord.Id == 6200)
+            {
+                template = new MessageTemplateParser()
+                    .Parse($"{iisEvent.EventData.First(p => p.Name == "cs-method").Value} request with status {iisEvent.EventData.First(p => p.Name == "sc-status").Value} on {iisEvent.EventData.First(p => p.Name == "s-sitename").Value} -- {iisEvent.EventData.First(p => p.Name == "cs-uri-stem").Value}");
+            }
+
+            var logEvent = new LogEvent(datetimeOffset, LogEventLevel.Information, null, template, properties);
+            Log.Logger.Write(logEvent);
         }
     }
 }

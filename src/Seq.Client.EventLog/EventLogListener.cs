@@ -2,6 +2,8 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Diagnostics.Eventing.Reader;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -20,6 +22,7 @@ namespace Seq.Client.EventLog
         public List<string> Sources { get; set; }
 
         private System.Diagnostics.EventLog _eventLog;
+        private EventLogWatcher _elWatcher;
         private readonly CancellationTokenSource _cancel = new();
         private Task _retroactiveLoadingTask;
         private volatile bool _started;
@@ -34,26 +37,41 @@ namespace Seq.Client.EventLog
 
         public void Start()
         {
-            try
+            if (System.Diagnostics.EventLog.Exists(LogName))
             {
-                Log.Logger.Information("Starting listener for {LogName} on {MachineName}", LogName, MachineName ?? ".");
-
-                _eventLog = OpenEventLog();
-
-                if (ProcessRetroactiveEntries)
+                try
                 {
-                    // Start as a new task so it doesn't block the startup of the service. This has
-                    // to go on its own thread to avoid deadlocking via `Wait()`/`Result`.
-                    _retroactiveLoadingTask = Task.Factory.StartNew(SendRetroactiveEntries, TaskCreationOptions.LongRunning);
-                }
+                    Log.Logger.Information("Starting listener for {LogName} on {MachineName}", LogName, MachineName ?? ".");
 
-                _eventLog.EntryWritten += OnEntryWritten;
-                _eventLog.EnableRaisingEvents = true;
-                _started = true;
+                    _eventLog = OpenEventLog();
+
+                    if (ProcessRetroactiveEntries)
+                    {
+                        // Start as a new task so it doesn't block the startup of the service. This has
+                        // to go on its own thread to avoid deadlocking via `Wait()`/`Result`.
+                        _retroactiveLoadingTask = Task.Factory.StartNew(SendRetroactiveEntries, TaskCreationOptions.LongRunning);
+                    }
+
+                    _eventLog.EntryWritten += OnEntryWritten;
+                    _eventLog.EnableRaisingEvents = true;
+                    _started = true;
+                }
+                catch (Exception ex)
+                {
+                    Log.Logger.Error(ex, "Failed to start listener for {LogName} on {MachineName}", LogName, MachineName ?? ".");
+                }
             }
-            catch (Exception ex)
+            else
             {
-                Log.Logger.Error(ex, "Failed to start listener for {LogName} on {MachineName}", LogName, MachineName ?? ".");
+                string logType = LogName;
+                string query = "*";
+
+                var elQuery = new EventLogQuery(logType, PathType.LogName, query);
+                _elWatcher = new EventLogWatcher(elQuery);
+
+                _elWatcher.EventRecordWritten += new EventHandler<EventRecordWrittenEventArgs>(EventLogEventRead);
+                _elWatcher.Enabled = true;
+
             }
         }
 
@@ -84,6 +102,13 @@ namespace Seq.Client.EventLog
 
                 _eventLog.Close();
                 _eventLog.Dispose();
+
+                // Stop listening to events
+                _elWatcher.Enabled = false;
+                if (_elWatcher != null)
+                {
+                    _elWatcher.Dispose();
+                }
 
                 Log.Logger.Information("Listener stopped");
             }
@@ -128,6 +153,15 @@ namespace Seq.Client.EventLog
             catch (Exception ex)
             {
                 Log.Logger.Error(ex, "Failed to handle an event log entry");
+            }
+        }
+
+        private void EventLogEventRead(object obj, EventRecordWrittenEventArgs arg)
+        {
+            // Make sure there was no error reading the event.
+            if (arg.EventRecord != null)
+            {
+                EventConsumer.PostEventRecord(arg.EventRecord);
             }
         }
 
